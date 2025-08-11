@@ -10,9 +10,13 @@
 (define-constant ERR_PENDING_TRANSFER (err u108))
 (define-constant ERR_NO_PENDING_TRANSFER (err u109))
 (define-constant ERR_INVALID_VERIFIER (err u110))
+(define-constant ERR_BREEDING_RECORD_EXISTS (err u111))
+(define-constant ERR_INVALID_PARENT (err u112))
+(define-constant ERR_SAME_GENDER_BREEDING (err u113))
 
 (define-data-var livestock-id-counter uint u0)
 (define-data-var verification-id-counter uint u0)
+(define-data-var breeding-record-counter uint u0)
 (define-data-var contract-paused bool false)
 
 (define-map livestock-registry
@@ -76,6 +80,25 @@
         status: (string-ascii 20),
         notes: (string-ascii 500),
     }
+)
+
+(define-map breeding-records
+    { breeding-id: uint }
+    {
+        offspring-id: uint,
+        sire-id: uint,
+        dam-id: uint,
+        breeding-date: uint,
+        birth-date: uint,
+        breeder: principal,
+        breeding-method: (string-ascii 50),
+        notes: (string-ascii 300),
+    }
+)
+
+(define-map livestock-offspring
+    { parent-id: uint }
+    { offspring-ids: (list 100 uint) }
 )
 
 (define-public (register-livestock
@@ -332,6 +355,59 @@
     )
 )
 
+(define-public (record-breeding
+        (offspring-id uint)
+        (sire-id uint)
+        (dam-id uint)
+        (breeding-date uint)
+        (birth-date uint)
+        (breeding-method (string-ascii 50))
+        (notes (string-ascii 300))
+    )
+    (let (
+            (breeding-id (+ (var-get breeding-record-counter) u1))
+            (offspring (unwrap! (map-get? livestock-registry { livestock-id: offspring-id })
+                ERR_LIVESTOCK_NOT_FOUND
+            ))
+            (sire (unwrap! (map-get? livestock-registry { livestock-id: sire-id })
+                ERR_INVALID_PARENT
+            ))
+            (dam (unwrap! (map-get? livestock-registry { livestock-id: dam-id })
+                ERR_INVALID_PARENT
+            ))
+        )
+        (asserts! (not (var-get contract-paused)) ERR_UNAUTHORIZED)
+        (asserts! (is-eq (get owner offspring) tx-sender) ERR_UNAUTHORIZED)
+        (asserts! (get active offspring) ERR_INVALID_TRANSFER)
+        (asserts! (get active sire) ERR_INVALID_PARENT)
+        (asserts! (get active dam) ERR_INVALID_PARENT)
+        (asserts! (not (is-eq (get gender sire) (get gender dam)))
+            ERR_SAME_GENDER_BREEDING
+        )
+        (asserts! (< breeding-date birth-date) ERR_INVALID_TRANSFER)
+        (asserts! (is-none (get-breeding-record-by-offspring offspring-id))
+            ERR_BREEDING_RECORD_EXISTS
+        )
+
+        (map-set breeding-records { breeding-id: breeding-id } {
+            offspring-id: offspring-id,
+            sire-id: sire-id,
+            dam-id: dam-id,
+            breeding-date: breeding-date,
+            birth-date: birth-date,
+            breeder: tx-sender,
+            breeding-method: breeding-method,
+            notes: notes,
+        })
+
+        (add-offspring-to-parent sire-id offspring-id)
+        (add-offspring-to-parent dam-id offspring-id)
+
+        (var-set breeding-record-counter breeding-id)
+        (ok breeding-id)
+    )
+)
+
 (define-read-only (get-livestock-info (livestock-id uint))
     (map-get? livestock-registry { livestock-id: livestock-id })
 )
@@ -376,6 +452,25 @@
     (var-get contract-paused)
 )
 
+(define-read-only (get-breeding-record (breeding-id uint))
+    (map-get? breeding-records { breeding-id: breeding-id })
+)
+
+(define-read-only (get-breeding-record-by-offspring (offspring-id uint))
+    (if (> offspring-id u0)
+        (map-get? breeding-records { breeding-id: offspring-id })
+        none
+    )
+)
+
+(define-read-only (get-livestock-offspring (parent-id uint))
+    (map-get? livestock-offspring { parent-id: parent-id })
+)
+
+(define-read-only (get-current-breeding-id)
+    (var-get breeding-record-counter)
+)
+
 (define-read-only (verify-ownership
         (livestock-id uint)
         (claimed-owner principal)
@@ -390,9 +485,9 @@
     (fold check-history-sequence
         (list
             u0             u1             u2             u3             u4
-                        u5             u6             u7             u8             u9
-                        u10             u11             u12             u13             u14
-                        u15             u16             u17             u18
+            u5             u6             u7             u8             u9
+            u10             u11             u12             u13             u14
+            u15             u16             u17             u18
             u19             u20
         )
         u0
@@ -436,4 +531,16 @@
 
 (define-private (is-not-target-livestock (id uint))
     (not (is-eq id u0))
+)
+
+(define-private (add-offspring-to-parent
+        (parent-id uint)
+        (offspring-id uint)
+    )
+    (let ((current-offspring (default-to (list)
+            (get offspring-ids
+                (map-get? livestock-offspring { parent-id: parent-id })
+            ))))
+        (map-set livestock-offspring { parent-id: parent-id } { offspring-ids: (unwrap-panic (as-max-len? (append current-offspring offspring-id) u100)) })
+    )
 )
