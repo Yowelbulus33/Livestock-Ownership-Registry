@@ -13,11 +13,19 @@
 (define-constant ERR_BREEDING_RECORD_EXISTS (err u111))
 (define-constant ERR_INVALID_PARENT (err u112))
 (define-constant ERR_SAME_GENDER_BREEDING (err u113))
+(define-constant ERR_INSURANCE_NOT_FOUND (err u114))
+(define-constant ERR_INSURANCE_EXPIRED (err u115))
+(define-constant ERR_CLAIM_EXISTS (err u116))
+(define-constant ERR_INVALID_COVERAGE_AMOUNT (err u117))
+(define-constant ERR_INVALID_CLAIM_AMOUNT (err u118))
+(define-constant ERR_CLAIM_NOT_FOUND (err u119))
 
 (define-data-var livestock-id-counter uint u0)
 (define-data-var verification-id-counter uint u0)
 (define-data-var breeding-record-counter uint u0)
 (define-data-var contract-paused bool false)
+(define-data-var insurance-policy-counter uint u0)
+(define-data-var insurance-claim-counter uint u0)
 
 (define-map livestock-registry
     { livestock-id: uint }
@@ -99,6 +107,43 @@
 (define-map livestock-offspring
     { parent-id: uint }
     { offspring-ids: (list 100 uint) }
+)
+
+(define-map insurance-policies
+    { policy-id: uint }
+    {
+        livestock-id: uint,
+        policy-holder: principal,
+        insurance-provider: (string-ascii 100),
+        coverage-amount: uint,
+        premium-amount: uint,
+        policy-start: uint,
+        policy-end: uint,
+        coverage-type: (string-ascii 50),
+        premium-paid: bool,
+        active: bool,
+    }
+)
+
+(define-map insurance-claims
+    { claim-id: uint }
+    {
+        policy-id: uint,
+        livestock-id: uint,
+        claimant: principal,
+        claim-amount: uint,
+        claim-date: uint,
+        incident-date: uint,
+        claim-reason: (string-ascii 300),
+        claim-status: (string-ascii 20),
+        approved-amount: uint,
+        processed-date: (optional uint),
+    }
+)
+
+(define-map livestock-insurance
+    { livestock-id: uint }
+    { policy-ids: (list 10 uint) }
 )
 
 (define-public (register-livestock
@@ -408,6 +453,171 @@
     )
 )
 
+(define-public (register-insurance-policy
+        (livestock-id uint)
+        (insurance-provider (string-ascii 100))
+        (coverage-amount uint)
+        (premium-amount uint)
+        (policy-duration uint)
+        (coverage-type (string-ascii 50))
+    )
+    (let (
+            (policy-id (+ (var-get insurance-policy-counter) u1))
+            (livestock (unwrap! (map-get? livestock-registry { livestock-id: livestock-id })
+                ERR_LIVESTOCK_NOT_FOUND
+            ))
+        )
+        (asserts! (not (var-get contract-paused)) ERR_UNAUTHORIZED)
+        (asserts! (is-eq (get owner livestock) tx-sender) ERR_UNAUTHORIZED)
+        (asserts! (get active livestock) ERR_INVALID_TRANSFER)
+        (asserts! (> coverage-amount u0) ERR_INVALID_COVERAGE_AMOUNT)
+        (asserts! (> premium-amount u0) ERR_INVALID_COVERAGE_AMOUNT)
+        (asserts! (> policy-duration u0) ERR_INVALID_COVERAGE_AMOUNT)
+        (asserts! (> (len insurance-provider) u0) ERR_INVALID_COVERAGE_AMOUNT)
+        (asserts! (> (len coverage-type) u0) ERR_INVALID_COVERAGE_AMOUNT)
+
+        (map-set insurance-policies { policy-id: policy-id } {
+            livestock-id: livestock-id,
+            policy-holder: tx-sender,
+            insurance-provider: insurance-provider,
+            coverage-amount: coverage-amount,
+            premium-amount: premium-amount,
+            policy-start: stacks-block-height,
+            policy-end: (+ stacks-block-height policy-duration),
+            coverage-type: coverage-type,
+            premium-paid: false,
+            active: true,
+        })
+
+        (let ((current-policies (default-to (list)
+                (get policy-ids
+                    (map-get? livestock-insurance { livestock-id: livestock-id })
+                ))))
+            (map-set livestock-insurance { livestock-id: livestock-id } { policy-ids: (unwrap! (as-max-len? (append current-policies policy-id) u10)
+                ERR_UNAUTHORIZED
+            ) }
+            )
+        )
+
+        (var-set insurance-policy-counter policy-id)
+        (ok policy-id)
+    )
+)
+
+(define-public (pay-insurance-premium (policy-id uint))
+    (let ((policy (unwrap! (map-get? insurance-policies { policy-id: policy-id })
+            ERR_INSURANCE_NOT_FOUND
+        )))
+        (asserts! (not (var-get contract-paused)) ERR_UNAUTHORIZED)
+        (asserts! (is-eq (get policy-holder policy) tx-sender) ERR_UNAUTHORIZED)
+        (asserts! (get active policy) ERR_INSURANCE_EXPIRED)
+        (asserts! (< stacks-block-height (get policy-end policy))
+            ERR_INSURANCE_EXPIRED
+        )
+
+        (map-set insurance-policies { policy-id: policy-id }
+            (merge policy { premium-paid: true })
+        )
+
+        (ok true)
+    )
+)
+
+(define-public (file-insurance-claim
+        (policy-id uint)
+        (claim-amount uint)
+        (incident-date uint)
+        (claim-reason (string-ascii 300))
+    )
+    (let (
+            (claim-id (+ (var-get insurance-claim-counter) u1))
+            (policy (unwrap! (map-get? insurance-policies { policy-id: policy-id })
+                ERR_INSURANCE_NOT_FOUND
+            ))
+            (livestock (unwrap!
+                (map-get? livestock-registry { livestock-id: (get livestock-id policy) })
+                ERR_LIVESTOCK_NOT_FOUND
+            ))
+        )
+        (asserts! (not (var-get contract-paused)) ERR_UNAUTHORIZED)
+        (asserts! (is-eq (get policy-holder policy) tx-sender) ERR_UNAUTHORIZED)
+        (asserts! (get active policy) ERR_INSURANCE_EXPIRED)
+        (asserts! (get premium-paid policy) ERR_INSURANCE_EXPIRED)
+        (asserts! (< stacks-block-height (get policy-end policy))
+            ERR_INSURANCE_EXPIRED
+        )
+        (asserts! (> claim-amount u0) ERR_INVALID_CLAIM_AMOUNT)
+        (asserts! (<= claim-amount (get coverage-amount policy))
+            ERR_INVALID_CLAIM_AMOUNT
+        )
+        (asserts! (<= incident-date stacks-block-height) ERR_INVALID_CLAIM_AMOUNT)
+        (asserts! (>= incident-date (get policy-start policy))
+            ERR_INVALID_CLAIM_AMOUNT
+        )
+        (asserts! (> (len claim-reason) u0) ERR_INVALID_CLAIM_AMOUNT)
+
+        (map-set insurance-claims { claim-id: claim-id } {
+            policy-id: policy-id,
+            livestock-id: (get livestock-id policy),
+            claimant: tx-sender,
+            claim-amount: claim-amount,
+            claim-date: stacks-block-height,
+            incident-date: incident-date,
+            claim-reason: claim-reason,
+            claim-status: "pending",
+            approved-amount: u0,
+            processed-date: none,
+        })
+
+        (var-set insurance-claim-counter claim-id)
+        (ok claim-id)
+    )
+)
+
+(define-public (process-insurance-claim
+        (claim-id uint)
+        (approved-amount uint)
+        (claim-status (string-ascii 20))
+    )
+    (let ((claim (unwrap! (map-get? insurance-claims { claim-id: claim-id })
+            ERR_CLAIM_NOT_FOUND
+        )))
+        (asserts! (not (var-get contract-paused)) ERR_UNAUTHORIZED)
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+        (asserts! (is-eq (get claim-status claim) "pending") ERR_CLAIM_NOT_FOUND)
+        (asserts! (<= approved-amount (get claim-amount claim))
+            ERR_INVALID_CLAIM_AMOUNT
+        )
+        (asserts! (> (len claim-status) u0) ERR_INVALID_CLAIM_AMOUNT)
+
+        (map-set insurance-claims { claim-id: claim-id }
+            (merge claim {
+                approved-amount: approved-amount,
+                claim-status: claim-status,
+                processed-date: (some stacks-block-height),
+            })
+        )
+
+        (ok true)
+    )
+)
+
+(define-public (cancel-insurance-policy (policy-id uint))
+    (let ((policy (unwrap! (map-get? insurance-policies { policy-id: policy-id })
+            ERR_INSURANCE_NOT_FOUND
+        )))
+        (asserts! (not (var-get contract-paused)) ERR_UNAUTHORIZED)
+        (asserts! (is-eq (get policy-holder policy) tx-sender) ERR_UNAUTHORIZED)
+        (asserts! (get active policy) ERR_INSURANCE_EXPIRED)
+
+        (map-set insurance-policies { policy-id: policy-id }
+            (merge policy { active: false })
+        )
+
+        (ok true)
+    )
+)
+
 (define-read-only (get-livestock-info (livestock-id uint))
     (map-get? livestock-registry { livestock-id: livestock-id })
 )
@@ -478,6 +688,47 @@
     (match (map-get? livestock-registry { livestock-id: livestock-id })
         livestock (is-eq (get owner livestock) claimed-owner)
         false
+    )
+)
+
+(define-read-only (get-insurance-policy (policy-id uint))
+    (map-get? insurance-policies { policy-id: policy-id })
+)
+
+(define-read-only (get-insurance-claim (claim-id uint))
+    (map-get? insurance-claims { claim-id: claim-id })
+)
+
+(define-read-only (get-livestock-insurance-policies (livestock-id uint))
+    (map-get? livestock-insurance { livestock-id: livestock-id })
+)
+
+(define-read-only (get-current-insurance-policy-id)
+    (var-get insurance-policy-counter)
+)
+
+(define-read-only (get-current-insurance-claim-id)
+    (var-get insurance-claim-counter)
+)
+
+(define-read-only (is-insurance-policy-active (policy-id uint))
+    (match (map-get? insurance-policies { policy-id: policy-id })
+        policy (and
+            (get active policy)
+            (< stacks-block-height (get policy-end policy))
+            (get premium-paid policy)
+        )
+        false
+    )
+)
+
+(define-read-only (get-policy-coverage-remaining (policy-id uint))
+    (match (map-get? insurance-policies { policy-id: policy-id })
+        policy (if (and (get active policy) (< stacks-block-height (get policy-end policy)))
+            (some (- (get policy-end policy) stacks-block-height))
+            none
+        )
+        none
     )
 )
 
