@@ -19,6 +19,9 @@
 (define-constant ERR_INVALID_COVERAGE_AMOUNT (err u117))
 (define-constant ERR_INVALID_CLAIM_AMOUNT (err u118))
 (define-constant ERR_CLAIM_NOT_FOUND (err u119))
+(define-constant ERR_NOT_VETERINARIAN (err u120))
+(define-constant ERR_INVALID_HEALTH_STATUS (err u121))
+(define-constant ERR_HEALTH_RECORD_NOT_FOUND (err u122))
 
 (define-data-var livestock-id-counter uint u0)
 (define-data-var verification-id-counter uint u0)
@@ -26,6 +29,7 @@
 (define-data-var contract-paused bool false)
 (define-data-var insurance-policy-counter uint u0)
 (define-data-var insurance-claim-counter uint u0)
+(define-data-var health-record-counter uint u0)
 
 (define-map livestock-registry
     { livestock-id: uint }
@@ -144,6 +148,32 @@
 (define-map livestock-insurance
     { livestock-id: uint }
     { policy-ids: (list 10 uint) }
+)
+
+(define-map authorized-veterinarians
+    { veterinarian: principal }
+    { active: bool }
+)
+
+(define-map health-records
+    {
+        livestock-id: uint,
+        record-id: uint,
+    }
+    {
+        veterinarian: principal,
+        record-date: uint,
+        health-status: (string-ascii 50),
+        notes: (string-utf8 500),
+        treatment: (string-ascii 100),
+        next-checkup: (optional uint),
+        vaccination-status: (string-ascii 50),
+    }
+)
+
+(define-map livestock-health
+    { livestock-id: uint }
+    { health-record-ids: (list 100 uint) }
 )
 
 (define-public (register-livestock
@@ -618,6 +648,116 @@
     )
 )
 
+(define-public (authorize-veterinarian (vet principal))
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+        (asserts! (not (var-get contract-paused)) ERR_UNAUTHORIZED)
+
+        (map-set authorized-veterinarians { veterinarian: vet } { active: true })
+
+        (ok true)
+    )
+)
+
+(define-public (deauthorize-veterinarian (vet principal))
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+        (asserts! (not (var-get contract-paused)) ERR_UNAUTHORIZED)
+
+        (map-set authorized-veterinarians { veterinarian: vet } { active: false })
+
+        (ok true)
+    )
+)
+
+(define-public (add-health-record
+        (livestock-id uint)
+        (health-status (string-ascii 50))
+        (notes (string-utf8 500))
+        (treatment (string-ascii 100))
+        (next-checkup (optional uint))
+        (vaccination-status (string-ascii 50))
+    )
+    (let (
+            (record-id (+ (var-get health-record-counter) u1))
+            (livestock (unwrap! (map-get? livestock-registry { livestock-id: livestock-id })
+                ERR_LIVESTOCK_NOT_FOUND
+            ))
+            (vet-status (unwrap! (map-get? authorized-veterinarians { veterinarian: tx-sender })
+                ERR_NOT_VETERINARIAN
+            ))
+        )
+        (asserts! (not (var-get contract-paused)) ERR_UNAUTHORIZED)
+        (asserts! (get active vet-status) ERR_NOT_VETERINARIAN)
+        (asserts! (get active livestock) ERR_INVALID_TRANSFER)
+        (asserts! (> (len health-status) u0) ERR_INVALID_HEALTH_STATUS)
+        (asserts! (> (len vaccination-status) u0) ERR_INVALID_HEALTH_STATUS)
+        (asserts! (> (len treatment) u0) ERR_INVALID_HEALTH_STATUS)
+
+        (map-set health-records {
+            livestock-id: livestock-id,
+            record-id: record-id,
+        } {
+            veterinarian: tx-sender,
+            record-date: stacks-block-height,
+            health-status: health-status,
+            notes: notes,
+            treatment: treatment,
+            next-checkup: next-checkup,
+            vaccination-status: vaccination-status,
+        })
+
+        (let ((current-records (default-to (list)
+                (get health-record-ids
+                    (map-get? livestock-health { livestock-id: livestock-id })
+                ))))
+            (map-set livestock-health { livestock-id: livestock-id } { health-record-ids: (unwrap! (as-max-len? (append current-records record-id) u100)
+                ERR_UNAUTHORIZED
+            ) }
+            )
+        )
+
+        (var-set health-record-counter record-id)
+        (ok record-id)
+    )
+)
+
+(define-public (update-health-status
+        (livestock-id uint)
+        (record-id uint)
+        (new-health-status (string-ascii 50))
+        (additional-notes (string-utf8 500))
+    )
+    (let (
+            (health-record (unwrap! (map-get? health-records {
+                livestock-id: livestock-id,
+                record-id: record-id,
+            })
+                ERR_HEALTH_RECORD_NOT_FOUND
+            ))
+            (vet-status (unwrap! (map-get? authorized-veterinarians { veterinarian: tx-sender })
+                ERR_NOT_VETERINARIAN
+            ))
+        )
+        (asserts! (not (var-get contract-paused)) ERR_UNAUTHORIZED)
+        (asserts! (get active vet-status) ERR_NOT_VETERINARIAN)
+        (asserts! (> (len new-health-status) u0) ERR_INVALID_HEALTH_STATUS)
+
+        (map-set health-records {
+            livestock-id: livestock-id,
+            record-id: record-id,
+        }
+            (merge health-record {
+                health-status: new-health-status,
+                notes: additional-notes,
+                record-date: stacks-block-height,
+            })
+        )
+
+        (ok true)
+    )
+)
+
 (define-read-only (get-livestock-info (livestock-id uint))
     (map-get? livestock-registry { livestock-id: livestock-id })
 )
@@ -731,6 +871,49 @@
         none
     )
 )
+
+(define-read-only (get-health-record
+        (livestock-id uint)
+        (record-id uint)
+    )
+    (map-get? health-records {
+        livestock-id: livestock-id,
+        record-id: record-id,
+    })
+)
+
+(define-read-only (is-authorized-veterinarian (vet principal))
+    (default-to { active: false }
+        (map-get? authorized-veterinarians { veterinarian: vet })
+    )
+)
+
+(define-read-only (get-livestock-health-records (livestock-id uint))
+    (map-get? livestock-health { livestock-id: livestock-id })
+)
+
+(define-read-only (get-current-health-record-id)
+    (var-get health-record-counter)
+)
+
+(define-read-only (get-latest-health-status (livestock-id uint))
+    (match (map-get? livestock-health { livestock-id: livestock-id })
+        health-data
+            (let ((record-ids (get health-record-ids health-data)))
+                (if (> (len record-ids) u0)
+                    (let ((latest-record-id (unwrap-panic (element-at record-ids (- (len record-ids) u1)))))
+                        (map-get? health-records {
+                            livestock-id: livestock-id,
+                            record-id: latest-record-id,
+                        })
+                    )
+                    none
+                )
+            )
+        none
+    )
+)
+
 
 (define-private (get-transfer-history-count (livestock-id uint))
     (fold check-history-sequence
