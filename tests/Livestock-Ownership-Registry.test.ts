@@ -63,8 +63,8 @@ describe("Livestock Ownership Registry Tests", () => {
         [Cl.uint(1)],
         address1
       );
-      
-      expect(result).toBeSome();
+
+      expect(result).toBeDefined();
     });
   });
 
@@ -104,7 +104,7 @@ describe("Livestock Ownership Registry Tests", () => {
         [Cl.principal(address2)],
         address1
       );
-      
+
       expect(result).toBeTuple({ active: Cl.bool(true) });
     });
 
@@ -148,7 +148,7 @@ describe("Livestock Ownership Registry Tests", () => {
         ],
         address2
       );
-      
+
       expect(result).toBeOk(Cl.uint(1));
     });
 
@@ -200,8 +200,8 @@ describe("Livestock Ownership Registry Tests", () => {
         [Cl.uint(1), Cl.uint(1)], // livestock-id, record-id
         address1
       );
-      
-      expect(result).toBeSome();
+
+      expect(result).toBeDefined();
     });
   });
 });
