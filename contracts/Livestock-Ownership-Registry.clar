@@ -683,7 +683,8 @@
             (livestock (unwrap! (map-get? livestock-registry { livestock-id: livestock-id })
                 ERR_LIVESTOCK_NOT_FOUND
             ))
-            (vet-status (unwrap! (map-get? authorized-veterinarians { veterinarian: tx-sender })
+            (vet-status (unwrap!
+                (map-get? authorized-veterinarians { veterinarian: tx-sender })
                 ERR_NOT_VETERINARIAN
             ))
         )
@@ -729,13 +730,15 @@
         (additional-notes (string-utf8 500))
     )
     (let (
-            (health-record (unwrap! (map-get? health-records {
-                livestock-id: livestock-id,
-                record-id: record-id,
-            })
+            (health-record (unwrap!
+                (map-get? health-records {
+                    livestock-id: livestock-id,
+                    record-id: record-id,
+                })
                 ERR_HEALTH_RECORD_NOT_FOUND
             ))
-            (vet-status (unwrap! (map-get? authorized-veterinarians { veterinarian: tx-sender })
+            (vet-status (unwrap!
+                (map-get? authorized-veterinarians { veterinarian: tx-sender })
                 ERR_NOT_VETERINARIAN
             ))
         )
@@ -898,22 +901,20 @@
 
 (define-read-only (get-latest-health-status (livestock-id uint))
     (match (map-get? livestock-health { livestock-id: livestock-id })
-        health-data
-            (let ((record-ids (get health-record-ids health-data)))
-                (if (> (len record-ids) u0)
-                    (let ((latest-record-id (unwrap-panic (element-at record-ids (- (len record-ids) u1)))))
-                        (map-get? health-records {
-                            livestock-id: livestock-id,
-                            record-id: latest-record-id,
-                        })
-                    )
-                    none
+        health-data (let ((record-ids (get health-record-ids health-data)))
+            (if (> (len record-ids) u0)
+                (let ((latest-record-id (unwrap-panic (element-at record-ids (- (len record-ids) u1)))))
+                    (map-get? health-records {
+                        livestock-id: livestock-id,
+                        record-id: latest-record-id,
+                    })
                 )
+                none
             )
+        )
         none
     )
 )
-
 
 (define-private (get-transfer-history-count (livestock-id uint))
     (fold check-history-sequence
@@ -976,5 +977,61 @@
                 (map-get? livestock-offspring { parent-id: parent-id })
             ))))
         (map-set livestock-offspring { parent-id: parent-id } { offspring-ids: (unwrap-panic (as-max-len? (append current-offspring offspring-id) u100)) })
+    )
+)
+
+(define-private (compute-owner-portfolio
+        (livestock-id uint)
+        (accumulator {
+            total-livestock: uint,
+            active-livestock: uint,
+            total-weight: uint,
+        })
+    )
+    (let ((maybe-livestock (map-get? livestock-registry { livestock-id: livestock-id })))
+        (match maybe-livestock
+            livestock (let (
+                    (new-total (+ (get total-livestock accumulator) u1))
+                    (new-active (+ (get active-livestock accumulator)
+                        (if (get active livestock)
+                            u1
+                            u0
+                        )))
+                    (new-weight (+ (get total-weight accumulator) (get weight livestock)))
+                )
+                {
+                    total-livestock: new-total,
+                    active-livestock: new-active,
+                    total-weight: new-weight,
+                }
+            )
+            accumulator
+        )
+    )
+)
+
+(define-read-only (get-owner-portfolio-summary (owner principal))
+    (let (
+            (livestock-ids (default-to (list)
+                (get livestock-ids (map-get? owner-livestock { owner: owner }))
+            ))
+            (totals (fold compute-owner-portfolio livestock-ids {
+                total-livestock: u0,
+                active-livestock: u0,
+                total-weight: u0,
+            }))
+            (total-count (get total-livestock totals))
+            (total-weight (get total-weight totals))
+            (average-weight (if (> total-count u0)
+                (some (/ total-weight total-count))
+                none
+            ))
+        )
+        {
+            total-livestock: total-count,
+            active-livestock: (get active-livestock totals),
+            total-weight: total-weight,
+            average-weight: average-weight,
+        }
     )
 )
